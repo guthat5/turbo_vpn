@@ -1,0 +1,7 @@
+name = "vpn-admin"
+main = "worker.js"
+compatibility_date = "2026-10-01"
+
+[[kv_namespaces]]
+binding = "DB"
+id = "ee26e677913646c990a5643480d3aef4"
