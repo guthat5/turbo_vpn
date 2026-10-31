@@ -27,6 +27,13 @@ async function save(env, list) {
   await env.DB.put('servers', JSON.stringify(list));
 }
 
+async function loadMeta(env) {
+  const raw = await env.DB.get('meta');
+  return raw
+    ? JSON.parse(raw)
+    : { build: 0, version: '', message: '', url: '' };
+}
+
 const PROTOCOLS = ['vless://', 'vmess://', 'trojan://', 'ss://'];
 
 function clean(b) {
@@ -55,7 +62,8 @@ export default {
       const list = (await load(env))
         .filter((s) => s.active)
         .map(({ id, name, country, link }) => ({ id, name, country, link }));
-      return json({ servers: list });
+      const meta = await loadMeta(env);
+      return json({ servers: list, update: meta.build > 0 ? meta : null });
     }
 
     // ---- Admin page ----
@@ -68,7 +76,37 @@ export default {
       });
     }
 
-    // ---- Admin API ----
+    // ---- Admin API: app update info ----
+    if (path === '/admin/api/meta') {
+      const token = (request.headers.get('Authorization') || '').replace(/^Bearer /, '');
+      const ok = env.ADMIN_PASSWORD && (await safeEqual(token, env.ADMIN_PASSWORD));
+      if (!ok) return json({ error: 'Wrong password' }, 401);
+
+      if (request.method === 'GET') return json(await loadMeta(env));
+
+      if (request.method === 'PUT') {
+        let b;
+        try {
+          b = await request.json();
+        } catch (_) {
+          return json({ error: 'Bad request' }, 400);
+        }
+        const meta = {
+          build: Math.max(0, parseInt(b.build, 10) || 0),
+          version: String(b.version || '').trim().slice(0, 20),
+          message: String(b.message || '').trim().slice(0, 300),
+          url: String(b.url || '').trim(),
+        };
+        if (meta.url && !meta.url.startsWith('https://')) {
+          return json({ error: 'APK link must start with https://' }, 400);
+        }
+        await env.DB.put('meta', JSON.stringify(meta));
+        return json(meta);
+      }
+      return json({ error: 'Method not allowed' }, 405);
+    }
+
+    // ---- Admin API: servers ----
     const m = path.match(/^\/admin\/api\/servers(?:\/([\w-]+))?$/);
     if (m) {
       const token = (request.headers.get('Authorization') || '').replace(/^Bearer /, '');
@@ -180,6 +218,19 @@ button.danger{color:var(--danger)}
     <button class="primary" id="fsave">Add server</button>
     <button id="fcancel" class="hidden">Cancel</button>
   </div>
+
+  <h2>App update</h2>
+  <div class="card">
+    <input id="mbuild" type="number" min="0" placeholder="Build number, for example 2">
+    <input id="mver" placeholder="Version, for example 1.1.0">
+    <input id="mmsg" placeholder="Message shown to users">
+    <input id="murl" placeholder="APK link, starts with https://">
+    <p class="err" id="merr"></p>
+    <div class="row">
+      <button class="primary" id="msave">Publish update</button>
+      <button class="danger" id="mclear">Clear update</button>
+    </div>
+  </div>
 </div>
 
 </div>
@@ -191,6 +242,19 @@ function $(id){return document.getElementById(id);}
 
 function api(method, suffix, body){
   return fetch('/admin/api/servers' + (suffix || ''), {
+    method: method,
+    headers: {'Authorization': 'Bearer ' + pw, 'Content-Type': 'application/json'},
+    body: body ? JSON.stringify(body) : undefined
+  }).then(function(r){
+    return r.json().then(function(d){
+      if(!r.ok) throw new Error(d.error || 'Something went wrong');
+      return d;
+    });
+  });
+}
+
+function metaApi(method, body){
+  return fetch('/admin/api/meta', {
     method: method,
     headers: {'Authorization': 'Bearer ' + pw, 'Content-Type': 'application/json'},
     body: body ? JSON.stringify(body) : undefined
@@ -238,12 +302,22 @@ function render(){
 
 function showErr(e){ $('ferr').textContent = e.message; }
 
+function loadMeta(){
+  return metaApi('GET').then(function(m){
+    $('mbuild').value = m.build || '';
+    $('mver').value = m.version || '';
+    $('mmsg').value = m.message || '';
+    $('murl').value = m.url || '';
+  });
+}
+
 function load(){
   return api('GET').then(function(d){
     servers = d.servers;
     $('login').classList.add('hidden');
     $('main').classList.remove('hidden');
     render();
+    return loadMeta();
   });
 }
 
@@ -271,6 +345,22 @@ $('fsave').onclick = function(){
   p.then(function(){ resetForm(); return load(); }).catch(showErr);
 };
 $('fcancel').onclick = resetForm;
+
+$('msave').onclick = function(){
+  metaApi('PUT', {
+    build: Number($('mbuild').value) || 0,
+    version: $('mver').value,
+    message: $('mmsg').value,
+    url: $('murl').value
+  }).then(function(){ $('merr').textContent = 'Published'; })
+    .catch(function(e){ $('merr').textContent = e.message; });
+};
+$('mclear').onclick = function(){
+  metaApi('PUT', {build: 0, version: '', message: '', url: ''})
+    .then(function(){ return loadMeta(); })
+    .then(function(){ $('merr').textContent = 'Cleared'; })
+    .catch(function(e){ $('merr').textContent = e.message; });
+};
 
 $('lbtn').onclick = function(){
   pw = $('pw').value;
